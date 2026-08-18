@@ -1,0 +1,3 @@
+#!/bin/bash
+# Relaunch the windows saved with omarchy-session-save before the last reboot.
+"$HOME/.local/bin/omarchy-session-restore"

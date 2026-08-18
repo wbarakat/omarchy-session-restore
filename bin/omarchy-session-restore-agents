@@ -1,0 +1,64 @@
+#!/bin/bash
+
+# omarchy:summary=Resume AI agents in herdr panes after a session restore
+# omarchy:args=[--dry-run]
+# omarchy:hidden=true
+
+set -uo pipefail
+
+AGENTS="$HOME/.local/state/omarchy/herdr-agents.json"
+[[ -f $AGENTS ]] || exit 0
+command -v herdr &>/dev/null || exit 0
+
+dry_run=false
+[[ ${1:-} == --dry-run ]] && dry_run=true
+
+# Wait for the herdr server. The relaunched client window starts it.
+panes=""
+for _ in $(seq 45); do
+  if panes=$(herdr pane list 2>/dev/null) &&
+    [[ $(jq '.result.panes | length' <<<"$panes" 2>/dev/null || echo 0) -gt 0 ]]; then
+    break
+  fi
+  panes=""
+  sleep 2
+done
+
+if [[ -z $panes ]]; then
+  $dry_run || mv "$AGENTS" "$AGENTS.skipped"
+  exit 0
+fi
+
+sleep 3 # let the restored panes settle at their shell prompts
+
+while IFS= read -r saved; do
+  kind=$(jq -r '.agent' <<<"$saved")
+  saved_pane=$(jq -r '.pane_id' <<<"$saved")
+  cwd=$(jq -r '.cwd' <<<"$saved")
+
+  # Prefer the same pane id. Fall back to an agent-free pane with the same cwd.
+  target=$(jq -r --arg p "$saved_pane" \
+    '.result.panes[] | select(.pane_id == $p and (has("agent") | not)) | .pane_id' <<<"$panes" | head -1)
+  if [[ -z $target ]]; then
+    target=$(jq -r --arg c "$cwd" \
+      '.result.panes[] | select(.cwd == $c and (has("agent") | not)) | .pane_id' <<<"$panes" | head -1)
+  fi
+  if [[ -z $target ]]; then
+    notify-send "Session restore" "No free herdr pane found to resume $kind in $cwd" 2>/dev/null
+    continue
+  fi
+
+  # Only claude gets a resume flag; other agent kinds start fresh
+  args=()
+  [[ $kind == claude ]] && args=(--continue)
+
+  if $dry_run; then
+    echo "herdr agent start $kind --kind $kind --pane $target --timeout 60000 -- ${args[*]:-}"
+  else
+    herdr agent start "$kind" --kind "$kind" --pane "$target" --timeout 60000 -- "${args[@]}" >/dev/null 2>&1 ||
+      notify-send "Session restore" "Could not resume $kind in herdr pane $target" 2>/dev/null
+    panes=$(herdr pane list 2>/dev/null) || break # refresh so the next agent picks a different pane
+  fi
+done < <(jq -c '.[]' "$AGENTS")
+
+$dry_run || mv "$AGENTS" "$AGENTS.restored"

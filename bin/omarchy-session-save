@@ -1,0 +1,86 @@
+#!/bin/bash
+
+# omarchy:summary=Save open windows and their workspaces for restore on next boot
+# omarchy:args=[--quiet]
+
+set -euo pipefail
+
+STATE_DIR="$HOME/.local/state/omarchy"
+MANIFEST="$STATE_DIR/session.json"
+mkdir -p "$STATE_DIR"
+
+TERMINAL_CLASSES=(Alacritty kitty foot com.mitchellh.ghostty org.wezfurlong.wezterm)
+SKIP_CLASSES=(walker)
+
+is_in() {
+  local x=$1 i
+  shift
+  for i in "$@"; do [[ $i == "$x" ]] && return 0; done
+  return 1
+}
+
+entries=()
+seen_pids=" "
+
+while IFS= read -r client; do
+  class=$(jq -r '.class' <<<"$client")
+  ws=$(jq -r '.workspace.id' <<<"$client")
+  floating=$(jq -r '.floating' <<<"$client")
+  pid=$(jq -r '.pid' <<<"$client")
+
+  ((ws > 0)) || continue # skip special workspaces (scratchpads)
+  ((pid > 0)) || continue
+  is_in "$class" "${SKIP_CLASSES[@]}" && continue
+  [[ -r /proc/$pid/cmdline ]] || continue
+
+  # Windows sharing a process (e.g. multiple Chromium windows) can only be
+  # relaunched once, so keep the first occurrence only.
+  [[ $seen_pids == *" $pid "* ]] && continue
+  seen_pids+="$pid "
+
+  # Rebuild a shell-safe launch command from the process's original argv
+  cmd=""
+  while IFS= read -r -d '' arg; do
+    cmd+="$(printf '%q' "$arg") "
+  done <"/proc/$pid/cmdline"
+  cmd=${cmd% }
+  [[ -n $cmd ]] || continue
+
+  # For terminals, record the shell's working directory so it can be restored
+  cwd=""
+  if is_in "$class" "${TERMINAL_CLASSES[@]}"; then
+    shell_pid=$(pgrep -P "$pid" 2>/dev/null | tail -n1 || true)
+    if [[ -n ${shell_pid:-} ]]; then
+      dir=$(readlink -f "/proc/$shell_pid/cwd" 2>/dev/null || true)
+      [[ -d $dir ]] && cwd=$dir
+    fi
+  fi
+
+  entries+=("$(jq -n \
+    --arg class "$class" \
+    --argjson workspace "$ws" \
+    --argjson floating "$floating" \
+    --arg cmd "$cmd" \
+    --arg cwd "$cwd" \
+    '{class: $class, workspace: $workspace, floating: $floating, cmd: $cmd, cwd: $cwd}')")
+done < <(hyprctl clients -j | jq -c '.[]')
+
+if ((${#entries[@]} == 0)); then
+  rm -f "$MANIFEST"
+  [[ ${1:-} == --quiet ]] || echo "No windows to save"
+  exit 0
+fi
+
+printf '%s\n' "${entries[@]}" | jq -s '.' >"$MANIFEST"
+
+# Snapshot herdr agent panes so omarchy-session-restore-agents can resume them
+AGENTS="$STATE_DIR/herdr-agents.json"
+rm -f "$AGENTS"
+if command -v herdr &>/dev/null; then
+  if agents_json=$(herdr agent list 2>/dev/null) &&
+    [[ $(jq '.result.agents | length' <<<"$agents_json" 2>/dev/null || echo 0) -gt 0 ]]; then
+    jq '[.result.agents[] | {agent, pane_id, cwd}]' <<<"$agents_json" >"$AGENTS"
+  fi
+fi
+
+[[ ${1:-} == --quiet ]] || echo "Saved ${#entries[@]} window(s) to $MANIFEST"

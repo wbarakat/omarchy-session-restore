@@ -1,0 +1,11 @@
+{
+  // Add these entries to ~/.config/omarchy/extensions/omarchy-menu.jsonc,
+  // then run: omarchy menu refresh
+  //
+  // "Save Session" adds a manual save row to the System menu.
+  // The reboot/shutdown overrides save the session automatically first
+  // (joined with ";" so a failed save never blocks the power action).
+  "system.session-save": {"icon":"󰆓","label":"Save Session","description":"Save open windows to restore on next boot","action":"~/.local/bin/omarchy-session-save --quiet && notify-send 'Session saved' 'Your windows will be restored on next boot'"},
+  "system.reboot": {"icon":"󰜉","label":"Reboot","action":"~/.local/bin/omarchy-session-save --quiet; omarchy-system-reboot"},
+  "system.shutdown": {"icon":"󰐥","label":"Shutdown","action":"~/.local/bin/omarchy-session-save --quiet; omarchy-system-shutdown"}
+}

@@ -1,0 +1,56 @@
+#!/bin/bash
+
+# omarchy:summary=Relaunch windows saved by omarchy-session-save onto their workspaces
+# omarchy:args=[--dry-run]
+
+set -euo pipefail
+
+MANIFEST="$HOME/.local/state/omarchy/session.json"
+[[ -f $MANIFEST ]] || exit 0
+
+dry_run=false
+[[ ${1:-} == --dry-run ]] && dry_run=true
+
+launcher=""
+command -v uwsm-app &>/dev/null && launcher="uwsm-app -- "
+
+while IFS= read -r entry; do
+  ws=$(jq -r '.workspace' <<<"$entry")
+  cmd=$(jq -r '.cmd' <<<"$entry")
+  cwd=$(jq -r '.cwd' <<<"$entry")
+  floating=$(jq -r '.floating' <<<"$entry")
+
+  # Terminals: start in the saved working directory
+  if [[ -n $cwd ]]; then
+    cmd="sh -c $(printf '%q' "cd $(printf '%q' "$cwd") && exec $cmd")"
+  fi
+
+  rules="workspace $ws silent"
+  [[ $floating == true ]] && rules+="; float"
+  exec_arg="[$rules] ${launcher}${cmd}"
+
+  # Hyprland 0.56+ evaluates dispatches as Lua, so issue the exec through
+  # hl.dsp.exec_cmd with a long-bracket string that needs no escaping.
+  level="="
+  while [[ $exec_arg == *"]${level}]"* ]]; do level+="="; done
+  lua="hl.dispatch(hl.dsp.exec_cmd([${level}[${exec_arg}]${level}]))"
+
+  if $dry_run; then
+    echo "hyprctl eval '$lua'"
+  else
+    hyprctl eval "$lua" >/dev/null
+    sleep 0.2 # stagger launches so the compositor applies each workspace rule cleanly
+  fi
+done < <(jq -c '.[]' "$MANIFEST")
+
+# Consume the manifest so the next boot doesn't relaunch everything again
+$dry_run || mv "$MANIFEST" "$MANIFEST.restored"
+
+# Resume AI agents inside herdr once its relaunched window brings the server up
+if [[ -f $HOME/.local/state/omarchy/herdr-agents.json ]]; then
+  if $dry_run; then
+    "$HOME/.local/bin/omarchy-session-restore-agents" --dry-run
+  else
+    setsid -f "$HOME/.local/bin/omarchy-session-restore-agents" >/dev/null 2>&1
+  fi
+fi
